@@ -7,19 +7,23 @@ module fmac_ws #(
 ) (
     input                           i_clk, 
     input                           i_reset_n,
+    input                           i_mode,
     input        [BFPEXPSIZE-1:0]   i_west_E,
     input        [BFPMANSIZE-1:0]   i_west_M [0:GRPSIZE-1],
+    input        [32-1:0]           i_west_fp,
     input        [BFPEXPSIZE-1:0]   i_south_E,
     input        [BFPMANSIZE-1:0]   i_south_M [0:GRPSIZE-1],
-    input        [32-1:0]           i_prev_result,
+    input        [32-1:0]           i_south_fp,
+    input        [32-1:0]           i_prev_diagonal,
     input                           i_pre_store,
+    input                           i_sel_diagonal,
     output logic [BFPEXPSIZE-1:0]   o_east_E,
     output logic [BFPMANSIZE-1:0]   o_east_M [0:GRPSIZE-1],
     output logic [32-1:0]           o_east_fp,
     output logic [BFPEXPSIZE-1:0]   o_north_E,
     output logic [BFPMANSIZE-1:0]   o_north_M [0:GRPSIZE-1],
     output logic [32-1:0]           o_north_fp,
-    output logic [32-1:0]           o_result
+    output logic [32-1:0]           o_diagonal
     );
 
     parameter LEVELS = $clog2(GRPSIZE);
@@ -46,6 +50,12 @@ module fmac_ws #(
     logic sel_east;
     logic sel_north;
 
+    /* floating point adder selection signal */
+    logic sel_adder_op;
+
+    /* selected floating point adder operand */
+    logic [32-1:0] adder_op;
+
     /* multiplication result */
     logic mul_rslt_sign [0:GRPSIZE-1];
     logic [(BFPEXPSIZE+1)-1:0] mul_rslt_exp;
@@ -58,7 +68,8 @@ module fmac_ws #(
     /* generated FP num */
     logic [32-1:0] fp;
 
-
+    /* result from floatin point adder */
+    logic [32-1:0] fp_result;
 
     /* select multiplier operands */
     assign mul_op1_E = sel_op1 == 0 ? i_west_E : weight_E;
@@ -70,6 +81,24 @@ module fmac_ws #(
             assign mul_op2_M[op_idx] = sel_op2 == 0 ? i_south_M : weight_M;
         end
     endgenerate
+
+    /* select adder operand */
+    always_comb begin
+        case(i_mode)
+            3'b001: begin
+                adder_op = i_west_fp;  // forward pass, i_west_fp + generated_fp
+            end
+            3'b010: begin
+                adder_op = i_south_fp;  // backward pass, i_south_fp + generated_fp
+            end
+            3'b100: begin
+                adder_op = Acc; // backward pass, Acc + generated_fp
+            end
+            default: begin
+                adder_op = 32'hx;
+            end
+        endcase
+    end
 
     /* pre-store weight */
     always_ff @ (posedge i_clk or negedge i_reset_n) begin
@@ -131,21 +160,86 @@ module fmac_ws #(
         .o_fp(fp)
     );
 
+    DW_fp_add #(
+        .sig_width(23),
+        .exp_width(8),
+        .ieee_compliance(1)
+    ) fp_adder(
+        .a(adder_op),
+        .b(fp),
+        .rnd(3'b011),
+        .z(fp_result),
+        .status()
+    );
 
+    /* output logic */
 
+    /* output result */
+    always_ff @ (posedge i_clk or negedge i_reset_n) begin
+        if(~i_reset_n) begin
+            o_east_fp <= 0;
+            o_north_fp <= 0;
+            o_diagonal <= 0;
+        end 
+        else begin
+            case(i_mode)
+                3'b001: begin
+                    o_east_fp <= fp_result;
+                    o_north_fp <= 0;
+                    o_diagonal <= 0;
+                end
+                3'b010: begin
+                    o_east_fp <= 0;
+                    o_north_fp <= fp_result;
+                    o_diagonal <= 0;
+                end
+                3'b100: begin
+                    o_east_fp <= 0;
+                    o_north_fp <= 0;
+                    /* diagonal output selection */
+                    if(i_sel_diagonal) begin
+                        o_diagonal <= fp_result;
+                    end
+                    else begin
+                        o_diagonal <= fp;
+                    end
+                end
+                default: begin
+                    o_east_fp <= 32'hx;
+                    o_north_fp <= 32'hx;
+                    o_diagonal <= 32'hx;
+                end
+            endcase
+        end
+    end
 
+    /* propagating inputs */
+    always_ff @ (posedge i_clk or negedge i_reset_n) begin
+        if(~i_reset_n) begin
+            o_east_E <= 0;
+            o_north_E <= 0;
+        end
+        else begin
+            o_east_E <= i_west_E;
+            o_north_E <= i_south_E;
+        end
+    end
+    genvar out;
+    generate
+        for(out=0; out<GRPSIZE; out=out+1) begin
+            always_ff @ (posedge i_clk or negedge i_reset_n) begin
+                if(~i_reset_n) begin
+                    o_east_M[out] <= 0;
+                    o_north_M[out] <= 0;
+                end
+                else begin
+                    o_east_M[out] <= i_west_M[out];
+                    o_north_M[out] <= i_south_M[out];
+                end
+            end
+        end
+    endgenerate
 
-
-    /* select output */
-    // assign o_north_E = sel_north == 0 ? i_south_E : mul_rslt;
-    // assign o_east_E = sel_east == 0 ? i_west_E : mul_rslt;
-    // genvar out_idx;
-    // generate
-    //     for(out_idx=0; out_idx<GRPSIZE; out_idx=out_idx+1) begin
-    //         assign o_north_E[out_idx] = sel_north == 0 ? i_south_M[out_idx] : mul_rslt;
-    //         assign o_east_E[out_idx] = sel_east == 0 ? i_west_M[out_idx] : mul_rslt;
-    //     end
-    // endgenerate
 
 
 
